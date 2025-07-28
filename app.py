@@ -58,45 +58,71 @@ class LoanSchedule:
             part_payment = 0
             part_payment_date = None
             
-            # Find if there's a part payment in this period
+            # Initialize variables for period calculation
+            period_interest = 0
+            current_period_start = current_date
+            temp_balance = remaining_balance
+            
+            # Get all part payments in this period, including those on the next payment date
+            period_part_payments = []
             for pp in self.part_payments:
                 pp_date = datetime.strptime(pp['date'], '%Y-%m-%d').date()
+                if current_date <= pp_date <= next_payment_date:
+                    period_part_payments.append({
+                        'date': pp_date,
+                        'amount': float(pp['amount']),
+                        'original_index': len([p for p in self.part_payments if p['date'] == pp['date'] and 
+                                            datetime.strptime(p['date'], '%Y-%m-%d').date() < pp_date]) + 1
+                    })
+            
+            # Sort part payments by date
+            period_part_payments.sort(key=lambda x: (x['date'], x.get('original_index', 0)))
+            
+            # Add the end of period as a marker
+            period_part_payments.append({'date': next_payment_date, 'amount': 0})
+            
+            # Calculate interest for each sub-period
+            for i, pp in enumerate(period_part_payments):
+                end_date = pp['date']
                 
-                if current_date <= pp_date < next_payment_date:
-                    part_payment += float(pp['amount'])
-                    part_payment_date = pp_date
-            
-            # Calculate interest based on the selected day count convention
-            if self.day_count_convention == 'actual_365':
-                # Actual/365: Actual days in period / 365 (or 366 for leap years)
-                days_in_year = 366 if self._is_leap_year(current_date.year) else 365
-                days_in_period = (next_payment_date - current_date).days
-                interest = remaining_balance * self.annual_interest_rate * days_in_period / days_in_year
-            else:  # 30/360
-                # 30/360: Assume 30 days per month, 360 days per year
-                # Formula: (360*(Y2-Y1)+30*(M2-M1)+(D2-D1))/360
-                y1, m1, d1 = current_date.year, current_date.month, min(current_date.day, 30)
-                y2, m2, d2 = next_payment_date.year, next_payment_date.month, min(next_payment_date.day, 30)
-                days = max(0, (360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)))  # Ensure non-negative days
-                interest = remaining_balance * self.annual_interest_rate * days / 360
-            
-            # Calculate principal and interest for the period
-            
-            # Apply part payment if any before calculating principal payment
-            if part_payment > 0 and part_payment_date:
-                # Apply part payment directly to principal
-                remaining_balance = max(remaining_balance - part_payment, 0)
+                # Skip if this is the same as the start date (shouldn't happen with sorted list)
+                if end_date <= current_period_start:
+                    continue
                 
-                # Add part payment entry
-                self.schedule.append({
-                    'payment_number': f"Part Payment {len([p for p in self.part_payments if p['date'] == part_payment_date.strftime('%Y-%m-%d')])}",
-                    'date': part_payment_date.strftime('%Y-%m-%d'),
-                    'payment': part_payment,
-                    'principal': part_payment,
-                    'interest': 0,
-                    'remaining_balance': remaining_balance,
-                    'is_part_payment': True
-                })
+                # Calculate days in sub-period
+                if self.day_count_convention == 'actual_365':
+                    days_in_year = 366 if self._is_leap_year(current_period_start.year) else 365
+                    days_in_subperiod = (end_date - current_period_start).days
+                    subperiod_interest = temp_balance * self.annual_interest_rate * days_in_subperiod / days_in_year
+                else:  # 30/360
+                    y1, m1, d1 = current_period_start.year, current_period_start.month, min(current_period_start.day, 30)
+                    y2, m2, d2 = end_date.year, end_date.month, min(end_date.day, 30)
+                    days = max(0, (360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)))
+                    subperiod_interest = temp_balance * self.annual_interest_rate * days / 360
+                
+                period_interest += subperiod_interest
+                
+                # Apply part payment to temp balance for next sub-period
+                if pp['amount'] > 0:
+                    # Add part payment entry
+                    payment_number = pp.get('original_index', 1)
+                    self.schedule.append({
+                        'payment_number': f"Part Payment {payment_number}",
+                        'date': end_date.strftime('%Y-%m-%d'),
+                        'payment': pp['amount'],
+                        'principal': pp['amount'],
+                        'interest': 0,
+                        'remaining_balance': temp_balance - pp['amount'],
+                        'is_part_payment': True
+                    })
+                    # Update balance after part payment
+                    temp_balance = max(temp_balance - pp['amount'], 0)
+                
+                current_period_start = end_date
+            
+            # Update the actual remaining balance after all part payments
+            remaining_balance = temp_balance
+            interest = period_interest
             
             # Calculate principal payment after applying part payment
             # This ensures the principal payment is calculated based on the updated remaining balance
@@ -146,11 +172,15 @@ def calculate():
     
     # Extract part payments if any
     part_payments = []
-    if data.get('hasPartPayment', False):
-        part_payments = [{
-            'amount': float(data['partPaymentAmount']),
-            'date': data['partPaymentDate']
-        }]
+    for pp in data.get('partPayments', []):
+        try:
+            part_payments.append({
+                'amount': float(pp['amount']),
+                'date': pp['date']
+            })
+        except (ValueError, KeyError):
+            # Skip invalid part payments
+            continue
     
     # Get day count convention (default to 'actual_365' if not specified)
     day_count_convention = data.get('dayCountConvention', 'actual_365')
