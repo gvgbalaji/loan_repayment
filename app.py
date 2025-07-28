@@ -63,7 +63,7 @@ class LoanSchedule:
             current_period_start = current_date
             temp_balance = remaining_balance
             
-            # Get all part payments in this period, including those on the next payment date
+            # Get part payments in this period, including those on the next payment date
             period_part_payments = []
             for pp in self.part_payments:
                 pp_date = datetime.strptime(pp['date'], '%Y-%m-%d').date()
