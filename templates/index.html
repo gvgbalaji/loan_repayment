@@ -120,6 +120,39 @@
                             </template>
                         </div>
                         
+                        <div class="mb-3">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h5 class="mb-0">Interest Rate Changes</h5>
+                                <button type="button" class="btn btn-sm btn-outline-primary" id="addRateChange">
+                                    <i class="bi bi-plus"></i> Add Rate Change
+                                </button>
+                            </div>
+                            <div id="rateChangesContainer">
+                                <!-- Rate changes will be added here -->
+                            </div>
+                            <template id="rateChangeTemplate">
+                                <div class="rate-change-entry card mb-2">
+                                    <div class="card-body p-2">
+                                        <div class="row g-2">
+                                            <div class="col-md-4">
+                                                <label class="form-label small text-muted">New Rate (%)</label>
+                                                <input type="number" class="form-control form-control-sm rate-change-rate" min="0.01" step="0.01" required>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <label class="form-label small text-muted">Effective Date</label>
+                                                <input type="text" class="form-control form-control-sm rate-change-date" required>
+                                            </div>
+                                            <div class="col-md-2 d-flex align-items-end">
+                                                <button type="button" class="btn btn-sm btn-outline-danger remove-rate-change w-100">
+                                                    <i class="bi bi-trash"></i> Remove
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                        
                         <div class="d-grid gap-2 mt-4">
                             <button type="submit" class="btn btn-primary">Calculate Schedule</button>
                         </div>
@@ -207,10 +240,29 @@
             initDatePicker(dateInput);
         });
 
+        // Add new rate change row
+        document.getElementById('addRateChange').addEventListener('click', function() {
+            const container = document.getElementById('rateChangesContainer');
+            const template = document.getElementById('rateChangeTemplate');
+            const newEntry = template.content.cloneNode(true);
+            container.appendChild(newEntry);
+            
+            // Initialize date picker for the new row
+            const dateInput = container.lastElementChild.querySelector('.rate-change-date');
+            initDatePicker(dateInput);
+        });
+
         // Remove part payment row
         document.addEventListener('click', function(e) {
             if (e.target.closest('.remove-part-payment')) {
                 e.target.closest('.part-payment-entry').remove();
+            }
+        });
+        
+        // Remove rate change row
+        document.addEventListener('click', function(e) {
+            if (e.target.closest('.remove-rate-change')) {
+                e.target.closest('.rate-change-entry').remove();
             }
         });
         
@@ -230,7 +282,11 @@
                 partPayments: Array.from(document.querySelectorAll('.part-payment-entry')).map(entry => ({
                     amount: entry.querySelector('.part-payment-amount').value,
                     date: entry.querySelector('.part-payment-date').value
-                })).filter(pp => pp.amount && pp.date)
+                })).filter(pp => pp.amount && pp.date),
+                rateChanges: Array.from(document.querySelectorAll('.rate-change-entry')).map(entry => ({
+                    rate: entry.querySelector('.rate-change-rate').value,
+                    date: entry.querySelector('.rate-change-date').value
+                })).filter(rc => rc.rate && rc.date)
             };
             
             // Validate part payment

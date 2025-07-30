@@ -6,7 +6,7 @@ import math
 app = Flask(__name__)
 
 class LoanSchedule:
-    def __init__(self, principal, annual_interest_rate, loan_term_years, start_date, part_payments=None, day_count_convention='actual_365'):
+    def __init__(self, principal, annual_interest_rate, loan_term_years, start_date, part_payments=None, rate_changes=None, day_count_convention='actual_365'):
         """
         Initialize a loan schedule calculator
         
@@ -16,6 +16,7 @@ class LoanSchedule:
             loan_term_years: Loan term in years
             start_date: Loan start date (YYYY-MM-DD)
             part_payments: List of additional payments with dates and amounts
+            rate_changes: List of interest rate changes with effective dates and new rates
             day_count_convention: 'actual_365' or '30_360' for interest calculation
         """
         self.principal = float(principal)
@@ -23,6 +24,13 @@ class LoanSchedule:
         self.loan_term_years = int(loan_term_years)
         self.start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
         self.part_payments = part_payments or []
+        self.rate_changes = sorted(
+            [{
+                'date': datetime.strptime(rc['date'], '%Y-%m-%d').date(),
+                'rate': float(rc['rate']) / 100  # Convert percentage to decimal
+            } for rc in (rate_changes or [])],
+            key=lambda x: x['date']
+        )
         self.day_count_convention = day_count_convention.lower()
         self.schedule = []
         
@@ -44,80 +52,120 @@ class LoanSchedule:
         
         # Process each payment
         remaining_balance = current_principal
+        current_rate = self._get_interest_rate_for_date(current_date)
+        
+        # Calculate monthly payment using the initial rate
+        if monthly_rate == 0:
+            monthly_payment = current_principal / total_payments
+        else:
+            monthly_payment = (current_principal * current_rate/12 * (1 + current_rate/12) ** total_payments) / \
+                            ((1 + current_rate/12) ** total_payments - 1)
+        
+        # Store the original payment day
+        original_payment_day = current_date.day
         
         for payment_num in range(1, total_payments + 1):
-            # Calculate next payment date first, handling month transitions correctly
-            next_month = current_date + relativedelta(months=1)
-            # Get the last day of next month
-            last_day_of_next_month = (next_month.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-            # Use the minimum of original day or last day of next month
-            next_payment_day = min(current_date.day, last_day_of_next_month.day)
-            next_payment_date = next_month.replace(day=next_payment_day)
+            # Calculate next payment date (1 month from current date)
+            next_payment_date = (current_date + relativedelta(months=1)).replace(day=min(original_payment_day, 28))
             
-            # Check for part payments in this period
-            part_payment = 0
-            part_payment_date = None
+            # Adjust for months with fewer days
+            last_day_of_month = (next_payment_date.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+            if next_payment_date.day != original_payment_day and next_payment_date.month == last_day_of_month.month:
+                next_payment_date = last_day_of_month
+            
+            # If we're in a short month, the next payment should be on the original day of the next month
+            if next_payment_date.day != original_payment_day and next_payment_date.month == (current_date + relativedelta(months=1)).month:
+                next_payment_date = next_payment_date.replace(day=min(original_payment_day, (next_payment_date + relativedelta(months=1)).day))
+            
+            # Get the rate for this payment period
+            # Check if there are any rate changes that should affect this payment
+            current_rate = self.annual_interest_rate
+            
+            # Find the most recent rate change that is on or before the payment date
+            for change in reversed(self.rate_changes):
+                if change['date'] <= next_payment_date:
+                    current_rate = change['rate']
+                    break
             
             # Initialize variables for period calculation
             period_interest = 0
             current_period_start = current_date
             temp_balance = remaining_balance
             
-            # Get part payments in this period, including those on the next payment date
-            period_part_payments = []
+            # Collect all events (part payments and rate changes) for the current period
+            period_events = []
+
+            # Add part payments as events
             for pp in self.part_payments:
                 pp_date = datetime.strptime(pp['date'], '%Y-%m-%d').date()
-                if current_date <= pp_date <= next_payment_date:
-                    period_part_payments.append({
+                if current_date < pp_date <= next_payment_date:
+                    period_events.append({
                         'date': pp_date,
+                        'type': 'part_payment',
                         'amount': float(pp['amount']),
                         'original_index': len([p for p in self.part_payments if p['date'] == pp['date'] and 
                                             datetime.strptime(p['date'], '%Y-%m-%d').date() < pp_date]) + 1
                     })
-            
-            # Sort part payments by date
-            period_part_payments.sort(key=lambda x: (x['date'], x.get('original_index', 0)))
-            
-            # Add the end of period as a marker
-            period_part_payments.append({'date': next_payment_date, 'amount': 0})
-            
-            # Calculate interest for each sub-period
-            for i, pp in enumerate(period_part_payments):
-                end_date = pp['date']
-                
-                # Skip if this is the same as the start date (shouldn't happen with sorted list)
+
+            # Add rate changes as events
+            for rc in self.rate_changes:
+                if current_date < rc['date'] <= next_payment_date:
+                    period_events.append({
+                        'date': rc['date'],
+                        'type': 'rate_change',
+                    })
+
+            # Sort all events chronologically
+            period_events.sort(key=lambda x: x['date'])
+
+            # Add the end-of-period payment date as the final event
+            period_events.append({'date': next_payment_date, 'type': 'payment_date'})
+
+            # Calculate interest across sub-periods defined by the events
+            for event in period_events:
+                end_date = event['date']
+
+                # Skip if the event is on the same day we are starting from
                 if end_date <= current_period_start:
-                    continue
-                
-                # Calculate days in sub-period
+                    # Still process part payments on the same day
+                    if event['type'] == 'part_payment' and event['date'] == current_period_start:
+                        pass # will be handled below
+                    else:
+                        continue
+
+                # Get the interest rate applicable at the beginning of this sub-period
+                subperiod_rate = self._get_interest_rate_for_date(current_period_start)
+
+                # Calculate interest for the sub-period
                 if self.day_count_convention == 'actual_365':
                     days_in_year = 366 if self._is_leap_year(current_period_start.year) else 365
                     days_in_subperiod = (end_date - current_period_start).days
-                    subperiod_interest = temp_balance * self.annual_interest_rate * days_in_subperiod / days_in_year
+                    subperiod_interest = temp_balance * subperiod_rate * days_in_subperiod / days_in_year
                 else:  # 30/360
                     y1, m1, d1 = current_period_start.year, current_period_start.month, min(current_period_start.day, 30)
                     y2, m2, d2 = end_date.year, end_date.month, min(end_date.day, 30)
                     days = max(0, (360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)))
-                    subperiod_interest = temp_balance * self.annual_interest_rate * days / 360
+                    subperiod_interest = temp_balance * subperiod_rate * days / 360
                 
                 period_interest += subperiod_interest
-                
-                # Apply part payment to temp balance for next sub-period
-                if pp['amount'] > 0:
-                    # Add part payment entry
-                    payment_number = pp.get('original_index', 1)
+
+                # If the event is a part payment, apply it to the balance
+                if event.get('type') == 'part_payment':
+                    part_payment_amount = event['amount']
+                    # Add part payment entry to the schedule
                     self.schedule.append({
-                        'payment_number': f"Part Payment {payment_number}",
+                        'payment_number': f"Part Payment {event.get('original_index', 1)}",
                         'date': end_date.strftime('%Y-%m-%d'),
-                        'payment': pp['amount'],
-                        'principal': pp['amount'],
+                        'payment': part_payment_amount,
+                        'principal': part_payment_amount,
                         'interest': 0,
-                        'remaining_balance': temp_balance - pp['amount'],
+                        'remaining_balance': temp_balance - part_payment_amount,
                         'is_part_payment': True
                     })
                     # Update balance after part payment
-                    temp_balance = max(temp_balance - pp['amount'], 0)
-                
+                    temp_balance = max(temp_balance - part_payment_amount, 0)
+
+                # Move the start of the next sub-period to the current event's date
                 current_period_start = end_date
             
             # Update the actual remaining balance after all part payments
@@ -152,6 +200,26 @@ class LoanSchedule:
                 
         return self.schedule
     
+    def _get_interest_rate_for_date(self, date):
+        """
+        Get the applicable interest rate for a given date.
+        
+        Args:
+            date: Date to check the interest rate for
+            
+        Returns:
+            float: The applicable annual interest rate (as a decimal)
+        """
+        # Start with the base rate
+        current_rate = self.annual_interest_rate
+        
+        # Apply the most recent rate change that is on or before the date
+        for change in reversed(self.rate_changes):
+            if change['date'] <= date:
+                return change['rate']
+                
+        return current_rate
+        
     def _is_leap_year(self, year):
         """Check if a year is a leap year."""
         return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
@@ -182,6 +250,18 @@ def calculate():
             # Skip invalid part payments
             continue
     
+    # Extract rate changes if any
+    rate_changes = []
+    for rc in data.get('rateChanges', []):
+        try:
+            rate_changes.append({
+                'rate': float(rc['rate']),
+                'date': rc['date']
+            })
+        except (ValueError, KeyError):
+            # Skip invalid rate changes
+            continue
+    
     # Get day count convention (default to 'actual_365' if not specified)
     day_count_convention = data.get('dayCountConvention', 'actual_365')
     
@@ -193,6 +273,7 @@ def calculate():
             loan_term_years=loan_term_years,
             start_date=start_date,
             part_payments=part_payments,
+            rate_changes=rate_changes,
             day_count_convention=day_count_convention
         )
         schedule = loan.calculate_schedule()
